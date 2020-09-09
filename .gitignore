@@ -41,6 +41,10 @@
 *.xz
 Module.symvers
 modules.builtin
+*.rej
+*.bak
+*.old
+*.new
 
 #
 # Top-level generic files
