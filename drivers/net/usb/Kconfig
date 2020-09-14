@@ -545,6 +545,13 @@ config USB_NET_QMI_WWAN_Q
 	help
 	  Qualcomm private QMI WWAN aggration protocol.
 
+config USB_NET_QMI_SIM8200
+	tristate "SIMCOM SIM8200 support QMI protocol"
+	depends on USB_USBNET
+	select USB_WDM
+	help
+	  SIMCOM SIM8200 support Qualcomm private QMI WWAN protocol.
+
 config USB_HSO
 	tristate "Option USB High Speed Mobile Devices"
 	depends on USB && RFKILL && TTY

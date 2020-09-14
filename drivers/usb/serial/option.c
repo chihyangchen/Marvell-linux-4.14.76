@@ -2059,6 +2059,13 @@ static int option_probe(struct usb_serial *serial,
         }
 #endif
 
+#if 1 /* Victor, 2020/9/11, support SIMCOM SIM8200 5G module */
+	if ( serial->dev->descriptor.idVendor == cpu_to_le16(0x1E0E) &&
+	     serial->dev->descriptor.idProduct == cpu_to_le16(0x9001) &&
+	     serial->interface->cur_altsetting->desc.bInterfaceNumber >= 5 )
+		return -ENODEV;
+#endif
+
 	/* Store the device flags so we can use them during attach. */
 	usb_set_serial_data(serial, (void *)device_flags);
 
