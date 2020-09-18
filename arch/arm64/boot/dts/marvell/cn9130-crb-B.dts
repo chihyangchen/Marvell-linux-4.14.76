@@ -20,14 +20,15 @@
 	phys = <&cp0_comphy0 0>;
 };
 
+/* unused it, so disable it
 &cp0_sata0 {
 	status = "okay";
 	sata-port@0 {
 		status = "okay";
-		/* Generic PHY, providing serdes lanes */
 		phys = <&cp0_comphy2 0>;
 	};
 };
+*/
 
 &cp0_usb3_0 {
 	status = "okay";
