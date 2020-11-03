@@ -1,0 +1,386 @@
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * Copyright (C) 2019 Marvell International Ltd.
+ */
+
+#include "cn9130-crb.dtsi"
+
+/ {
+	model = "5GTAU-TCT";
+	compatible = "marvell,cn9130-crb-B",
+		"marvell,armada-ap807-quad",
+		"marvell,armada-ap807";
+
+	memory@00000000 {
+		device_type = "memory";
+		reg = <0x0 0x0 0x0 0x20000000>;
+        };
+};
+
+/ {
+	cp0_reg_3v3_vcc: cp0_sd_vcc@0 {
+		compatible = "regulator-fixed";
+		regulator-name = "cp0_sd_vcc";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		gpio = <&cp0_gpio1 0 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-always-on;
+	};
+};
+
+&cp0_pinctrl {
+	cp0_spi0_pins_crb: cp0-spi-pins-crb {
+		marvell,pins = "mpp56", "mpp57", "mpp58", "mpp59";
+		marvell,function = <6>;
+	};
+
+	cp0_spi1_pins_crb: cp0-spi-pins-crb {
+		marvell,pins = "mpp47", "mpp48", "mpp49", "mpp50";
+		marvell,function = "spi1";
+	};
+
+	cp0_pcie_pins_reset: cp0-pcie-pins-reset {
+		marvell,pins = "mpp3";
+		marvell,function = <6>;
+	};
+
+	cp0_pcie_pins_clkreq: cp0-pcie-pins-clkreq {
+		marvell,pins = "mpp6";
+		marvell,function = <7>;
+	};
+
+	cp0_mdio_pins_crb: cp0-mdio-pins-crb {
+		marvell,pins = "mpp40", "mpp41";
+		marvell,function = "ge";
+	};
+
+	/* interrupt pin */
+	cp0_gpio_switch0_pins_crb: cp0-gpio-switch0-pins-crb {
+		marvell,pins = "mpp13";
+		marvell,function = "gpio";
+	};
+
+	uart0_pins_dtr_dsr: uart0-pins-dtr-dsr {
+		marvell,pins = "mpp8", "mpp9";
+		marvell,function = <0>; /* gpio */
+	};
+};
+
+&uart0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart0_pins_dtr_dsr>;
+	dtr {
+		gpio-hog;
+		gpios = <&cp0_gpio1 9 1>;
+		output-low;
+	};
+	dsr {
+		gpio-hog;
+		gpios = <&cp0_gpio1 8 1>;
+		input;
+	};
+};
+
+&cp0_pcie0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&cp0_pcie_pins_reset
+		     &cp0_pcie_pins_clkreq>;
+	num-lanes = <1>;
+	num-viewport = <8>;
+	/* Generic PHY, providing serdes lanes */
+	phys = <&cp0_comphy0 0>;
+	status = "disabled";
+};
+
+&cp0_sdhci0 { /* external SD card */
+	status = "disabled";
+};
+
+&ap_sdhci0 { /* embedded eMMC */
+	mmc-ddr-3_3v;
+	cap-mmc-highspeed;
+	/delete-property/ mmc-ddr-1_8v;
+	/delete-property/ mmc-hs400-1_8v;
+	/delete-property/ vqmmc-supply;
+};
+
+&cp0_reg_usb3_vbus1 { /* FIXME: maybe detelet-node it */
+	gpio = <&gpioexp1 0 GPIO_ACTIVE_HIGH>;
+	status = "disabled";
+};
+
+/delete-node/ &ap0_reg_mmc_vccq; /* it is used mcp23x17@20 */
+
+&cp0_i2c0 {
+	/delete-node/ mcp23x17@20;
+
+	rtc@32 {
+		compatible = "epson,rx8130";
+		reg = <0x32>;
+		status = "okay";
+	};
+
+        powermon@40 {
+		compatible = "ti,ina219";
+		reg = <0x40>;
+		shunt-resistor = <5000>;
+		status = "okay";
+	};
+
+	eeprom@51 {
+		compatible = "atmel,24c128";
+		reg = <0x51>;
+		u-boot,i2c-offset-len = <2>;
+		status = "okay";
+	};
+
+	thermal@48 {
+		compatible = "national,lm75";
+		reg = <0x48>;
+		status = "okay";
+	};
+
+	gpioexp0: gpioexp0@74 {
+		compatible = "ti,tca9539";
+		reg = <0x74>;
+		#gpio-cells = <2>;
+		gpio-controller;
+		status = "okay";
+		vcc-supply = <&cp0_reg_3v3_vcc>;
+		interrupts = <&cp0_gpio2 19 IRQ_TYPE_LEVEL_LOW>;
+	};
+
+	gpioexp1: gpioexp1@75 {
+		compatible = "ti,tca9539";
+		reg = <0x75>;
+		#gpio-cells = <2>;
+		gpio-controller;
+		status = "okay";
+		vcc-supply = <&cp0_reg_3v3_vcc>;
+		interrupts = <&cp0_gpio2 19 IRQ_TYPE_LEVEL_LOW>;
+	};
+
+	gpioexp2: gpioexp2@77 {
+		compatible = "ti,tca9539";
+		reg = <0x77>;
+		#gpio-cells = <2>;
+		gpio-controller;
+		status = "okay";
+		vcc-supply = <&cp0_reg_3v3_vcc>;
+	};
+};
+
+&cp0_spi0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&cp0_spi0_pins_crb>;
+	reg = <0x700600 0x50>,		/* control */
+	      <0x2000000 0x1000000>,	/* CS0 */
+	      <0 0xffffffff>,		/* CS1 */
+	      <0 0xffffffff>,		/* CS2 */
+	      <0 0xffffffff>;		/* CS3 */
+	status = "okay";
+
+	spi-flash@0 {
+		#address-cells = <0x1>;
+		#size-cells = <0x1>;
+		compatible = "macronix,mx25l12805", "jedec,spi-nor", "spi-flash";
+		reg = <0x0>;
+		/* On-board MUX does not allow higher frequencies */
+		spi-max-frequency = <40000000>;
+		status = "okay";
+        };
+};
+
+&cp0_spi1 {
+        pinctrl-names = "default";
+        pinctrl-0 = <&cp0_spi1_pins_crb>;
+        reg = <0x700680 0x50>,		/* control */
+              <0x2000000 0x1000000>;	/* CS0 */
+        status = "disabled";
+
+	tpm2@0 {
+        	status = "disabled";
+		interrupts = <&cp0_gpio2 29 IRQ_TYPE_LEVEL_LOW>;
+		reset-gpios = <&cp0_gpio2 30 GPIO_ACTIVE_LOW>;
+		reset {
+			gpio-hog;
+			gpios = <&cp0_gpio2 30 1>;
+			output-high;
+		};
+	};
+};
+
+&cp0_mdio {
+	pinctrl-names = "ge";
+	pinctrl-0 = <&cp0_mdio_pins_crb>;
+
+	#address-cells = <1>;
+	#size-cells = <0>;
+	#interrupt-cells = <2>;
+
+	/delete-node/ ethernet-phy@0;
+
+	switch0: switch0@0 {
+		compatible = "marvell,mv88e6393x";
+		pinctrl-0 = <&cp0_gpio_switch0_pins_crb>;
+		pinctrl-names = "default";
+		reg = <0>;
+		phy-addr = <0>;
+		port-mask = <0x3ff>;
+
+		dsa,member = <0 0>;
+
+		interrupt-parent = <&cp0_gpio1>;
+		interrupts = <13 IRQ_TYPE_LEVEL_LOW>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			port@1 {
+				reg = <1>;
+				label = "p1";
+				phy-handle = <&switch0port1>;
+			};
+			port@2 {
+				reg = <2>;
+				label = "p2";
+				phy-handle = <&switch0port2>;
+			};
+			port@3 {
+				reg = <3>;
+				label = "p3";
+				phy-handle = <&switch0port3>;
+			};
+			port@4 {
+				reg = <4>;
+				label = "p4";
+				phy-handle = <&switch0port4>;
+			};
+			/* no-used
+			port@5 {
+				reg = <5>;
+				label = "p5";
+				phy-handle = <&switch0port5>;
+			};
+			port@6 {
+				reg = <6>;
+				label = "p6";
+				phy-handle = <&switch0port6>;
+			};
+			port@7 {
+				reg = <7>;
+				label = "p7";
+				phy-handle = <&switch0port7>;
+			};
+			port@8 {
+				reg = <8>;
+				label = "p8";
+				phy-handle = <&switch0port8>;
+			};
+			port@9 {
+				reg = <9>;
+				label = "p9";
+				phy-mode = "sgmii";
+				fixed-link {
+					speed = <1000>;
+					full-duplex;
+				};
+			};
+			port@10 {
+				reg = <0xa>;
+				label = "p10";
+				phy-mode = "sgmii";
+				fixed-link {
+					speed = <1000>;
+					full-duplex;
+				};
+			};
+			*/
+			port0: port@0 {
+				reg = <0>;
+				label = "cpu";
+				phy-mode = "10gbase-kr";
+				ethernet = <&cp0_eth0>;
+			};
+		};
+
+		mdio-bus {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			switch0port1: switch0port@1 {
+				reg = <1>;
+				interrupt-parent = <&switch0>;
+				interrupts = <1 IRQ_TYPE_LEVEL_HIGH>;
+			};
+			switch0port2: switch0port@2 {
+				reg = <2>;
+				interrupt-parent = <&switch0>;
+				interrupts = <2 IRQ_TYPE_LEVEL_HIGH>;
+			};
+			switch0port3: switch0port@3 {
+				reg = <3>;
+				interrupt-parent = <&switch0>;
+				interrupts = <3 IRQ_TYPE_LEVEL_HIGH>;
+			};
+			switch0port4: switch0port@4 {
+				reg = <4>;
+				interrupt-parent = <&switch0>;
+				interrupts = <4 IRQ_TYPE_LEVEL_HIGH>;
+			};
+			/* no-used
+			switch0port5: switch0port@5 {
+				reg = <5>;
+				interrupt-parent = <&switch0>;
+				interrupts = <5 IRQ_TYPE_LEVEL_HIGH>;
+			};
+			switch0port6: switch0port@6 {
+				reg = <6>;
+				interrupt-parent = <&switch0>;
+				interrupts = <6 IRQ_TYPE_LEVEL_HIGH>;
+			};
+			switch0port7: switch0port@7 {
+				reg = <7>;
+				interrupt-parent = <&switch0>;
+				interrupts = <7 IRQ_TYPE_LEVEL_HIGH>;
+			};
+			switch0port8: switch0port@8 {
+				reg = <8>;
+				interrupt-parent = <&switch0>;
+				interrupts = <8 IRQ_TYPE_LEVEL_HIGH>;
+			};
+			*/
+		};
+	};
+};
+
+&cp0_xmdio {
+	status = "okay";
+	/delete-node/ ethernet-phy@0;
+};
+
+&cp0_eth1 {
+	/delete-property/ phy;
+	status = "disabled";
+};
+
+&cp0_eth2 {
+	/delete-property/ phy;
+	status = "disabled";
+};
+
+&cp0_usb3_0 {
+	status = "okay";
+	usb-phy = <&cp0_usb3_0_phy0>;
+	phy-names = "usb";
+	phys = <&cp0_comphy1 0>;
+};
+
+&cp0_usb3_1 {
+	status = "okay";
+	usb-phy = <&cp0_usb3_0_phy1>;
+	phy-names = "usb";
+	phys = <&cp0_comphy3 1>;
+};
