@@ -1867,6 +1867,37 @@ struct xhci_hcd {
 /* Compliance Mode Timer Triggered every 2 seconds */
 #define COMP_MODE_RCVRY_MSECS 2000
 
+	/* follow to add by Victor 2020/11/27 */
+	/* segment DMA mapping patch from CIP kernel 4.19.140 */
+#define SEG_DMA_PATCH 1
+
+	/* patch HC event ring maintain issue, it is patched from kernel 5.x
+         * mask it will not do it */
+#define EVENT_RING_PATCH 1
+
+	/* how max time in handle event ring interrupt while loop
+	 * mask it will not do it */
+//#define XHCI_IRQ_MAX_USED_MSECS 20
+
+	/* to change event ring dequeue when HC event type 37 happened, this 
+	 * value must be > 1
+	 * mask it will not do it */
+#define UPDATE_HC_DEQUEUE_REG 5 
+#define HANDLE_EVENT_SHUTDOWN 1
+
+//#define VICTOR_USB3_PATCH 1
+#ifdef VICTOR_USB3_PATCH
+	/* unit msec, mask it will not do it */
+#define XHCI_IRQ_POLLING_MSECS	100
+
+	/* to ack interrupt in polling call back function, 
+	 * mask it will not be ack */
+#define XHCI_IRQ_POLLING_ACK_IRQ 1
+
+	struct timer_list	irq_polling_timer;
+#endif /* VICTOR_USB3_PATCH */
+	/* above add by Victor 2020/11/27 */
+
 	/* platform-specific data -- must come last */
 	unsigned long		priv[0] __aligned(sizeof(s64));
 };

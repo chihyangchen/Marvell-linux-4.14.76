@@ -92,7 +92,7 @@ module_param( qca_nss_enabled, uint, S_IRUGO);
  * These devices may alternatively/additionally be configured using AT
  * commands on a serial interface
  */
-#define VERSION_NUMBER "V1.2.0.12"
+#define VERSION_NUMBER "V1.2.0.15"
 #define QUECTEL_WWAN_VERSION "Quectel_Linux&Android_QMI_WWAN_Driver_"VERSION_NUMBER
 static const char driver_name[] = "qmi_wwan_q";
 
@@ -116,12 +116,12 @@ static const u8 default_modem_addr[ETH_ALEN] = {0x02, 0x50, 0xf3};
     1 - QMAP (Aggregation protocol)
     X - QMAP (Multiplexing and Aggregation protocol)
 */
-#define QUECTEL_WWAN_QMAP 4
+#define QUECTEL_WWAN_QMAP 4 //MAX is 7
 
 #if defined(QUECTEL_WWAN_QMAP)
 #define QUECTEL_QMAP_MUX_ID 0x81
 
-static uint __read_mostly qmap_mode = 4;
+static uint __read_mostly qmap_mode = 0;
 module_param( qmap_mode, uint, S_IRUGO);
 module_param_named( rx_qmap, qmap_mode, uint, S_IRUGO );
 #endif
@@ -173,6 +173,7 @@ typedef struct sQmiWwanQmap
 
 #if defined(QUECTEL_UL_DATA_AGG)
 	struct tx_agg_ctx tx_ctx;
+	struct tasklet_struct	txq;
 #endif
 
 #ifdef QUECTEL_BRIDGE_MODE
@@ -184,7 +185,7 @@ typedef struct sQmiWwanQmap
 	RMNET_INFO rmnet_info;
 } sQmiWwanQmap;
 
-#if LINUX_VERSION_CODE > KERNEL_VERSION(3,10,0)
+#if LINUX_VERSION_CODE > KERNEL_VERSION(3,13,0) //8f84985fec10de64a6b4cdfea45f2b0ab8f07c78
 #define MHI_NETDEV_STATUS64
 #endif
 struct qmap_priv {
@@ -194,6 +195,7 @@ struct qmap_priv {
 	u8 offset_id;
 	u8 mux_id;
 	u8 qmap_version; // 5~v1, 9~v5
+	u8 link_state;
 
 #if defined(MHI_NETDEV_STATUS64)
 	struct pcpu_sw_netstats __percpu *stats64;
@@ -228,19 +230,36 @@ enum rmnet_map_v5_header_type {
 
 /* Main QMAP header */
 struct rmnet_map_header {
+#if defined(__LITTLE_ENDIAN_BITFIELD)
 	u8  pad_len:6;
 	u8  next_hdr:1;
 	u8  cd_bit:1;
+#elif defined (__BIG_ENDIAN_BITFIELD)
+	u8  cd_bit:1;
+	u8  next_hdr:1;
+	u8  pad_len:6;
+#else
+#error	"Please fix <asm/byteorder.h>"
+#endif
 	u8  mux_id;
 	__be16 pkt_len;
 }  __aligned(1);
 
 /* QMAP v5 headers */
 struct rmnet_map_v5_csum_header {
+#if defined(__LITTLE_ENDIAN_BITFIELD)
 	u8  next_hdr:1;
 	u8  header_type:7;
 	u8  hw_reserved:7;
 	u8  csum_valid_required:1;
+#elif defined (__BIG_ENDIAN_BITFIELD)
+	u8  header_type:7;
+	u8  next_hdr:1;
+	u8  csum_valid_required:1;
+	u8  hw_reserved:7;
+#else
+#error	"Please fix <asm/byteorder.h>"
+#endif
 	__be16 reserved;
 } __aligned(1);
 
@@ -390,15 +409,22 @@ static ssize_t link_state_store(struct device *dev, struct device_attribute *att
 	uint offset_id = 0;
 
 	link_state = simple_strtoul(buf, NULL, 0);
-	if (pQmapDev->qmap_mode == 1)
-		pQmapDev->link_state = !!link_state;
-	else if (pQmapDev->qmap_mode > 1) {
-		offset_id = ((link_state&0xF) - 1);
 
-		if (0 < link_state && link_state <= pQmapDev->qmap_mode)
-			pQmapDev->link_state |= (1 << offset_id);
-		else if (0x80 < link_state && link_state <= (0x80 + pQmapDev->qmap_mode))
+	if (pQmapDev->qmap_mode == 1) {
+		pQmapDev->link_state = !!link_state;
+	}
+	else if (pQmapDev->qmap_mode > 1) {
+		offset_id = ((link_state&0x7F) - 1);
+
+		if (offset_id >= pQmapDev->qmap_mode) {
+			dev_info(dev, "%s offset_id is %d. but qmap_mode is %d\n", __func__, offset_id, pQmapDev->qmap_mode);
+			return count;
+		}
+
+		if (link_state&0x80)
 			pQmapDev->link_state &= ~(1 << offset_id);
+		else
+			pQmapDev->link_state |= (1 << offset_id);
 	}
 
 	if (old_link != pQmapDev->link_state) {
@@ -410,11 +436,18 @@ static ssize_t link_state_store(struct device *dev, struct device_attribute *att
 			netif_carrier_off(usbnetdev->net);
 		}
 
-		if (qmap_net) {
-			if (pQmapDev->link_state & (1 << offset_id))
+		if (qmap_net && qmap_net != netdev) {
+			struct qmap_priv *priv = netdev_priv(qmap_net);
+
+			priv->link_state = !!(pQmapDev->link_state & (1 << offset_id));
+			if (priv->link_state) {
 				netif_carrier_on(qmap_net);
-			else
+				if (netif_queue_stopped(qmap_net) && !netif_queue_stopped(usbnetdev->net))
+					netif_wake_queue(qmap_net);
+			}
+			else {
 				netif_carrier_off(qmap_net);
+			}
 		}
 
 		dev_info(dev, "link_state 0x%x -> 0x%x\n", old_link, pQmapDev->link_state);
@@ -426,25 +459,29 @@ static ssize_t link_state_store(struct device *dev, struct device_attribute *att
 #ifdef QUECTEL_BRIDGE_MODE
 static ssize_t bridge_mode_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count) {
 	struct net_device *netdev = to_net_dev(dev);
-
+	uint old_mode = 0;
 	uint bridge_mode = simple_strtoul(buf, NULL, 0);
     
-#ifdef CONFIG_QCA_NSS_DRV
-	if (qca_nss_enabled)
+	if (netdev->type != ARPHRD_ETHER) {
 		return count;
-#endif
+	}
 
 	if (is_qmap_netdev(netdev)) {
 		struct qmap_priv *priv = netdev_priv(netdev);
+		old_mode = priv->bridge_mode;
 		priv->bridge_mode = bridge_mode;
 	}
 	else {
 		struct usbnet * usbnetdev = netdev_priv( netdev );
 		struct qmi_wwan_state *info = (void *)&usbnetdev->data;
 		sQmiWwanQmap *pQmapDev = (sQmiWwanQmap *)info->unused;
+		old_mode = pQmapDev->bridge_mode;
 		pQmapDev->bridge_mode = bridge_mode;
 	}
-    dev_info(dev, "bridge_mode change to 0x%x\n", bridge_mode);
+
+	if (old_mode != bridge_mode) {
+		dev_info(dev, "bridge_mode change to 0x%x\n", bridge_mode);
+	}
 
 	return count;
 }
@@ -547,17 +584,31 @@ static int qmap_open(struct net_device *dev)
 	struct qmap_priv *priv = netdev_priv(dev);
 	struct net_device *real_dev = priv->real_dev;
 
+    //printk("%s %s real_dev %d %d %d %d+++\n", __func__, dev->name,
+    //    netif_carrier_ok(real_dev), netif_queue_stopped(real_dev), netif_carrier_ok(dev), netif_queue_stopped(dev));
+
 	if (!(priv->real_dev->flags & IFF_UP))
 		return -ENETDOWN;
 
-	if (netif_carrier_ok(real_dev))
+	if (netif_carrier_ok(real_dev) && priv->link_state)
 		netif_carrier_on(dev);
+
+	if (netif_carrier_ok(dev)) {
+		if (netif_queue_stopped(dev) && !netif_queue_stopped(real_dev))
+			netif_wake_queue(dev);
+	}
+    //printk("%s %s real_dev %d %d %d %d---\n", __func__, dev->name,
+    //    netif_carrier_ok(real_dev), netif_queue_stopped(real_dev), netif_carrier_ok(dev), netif_queue_stopped(dev));
+
 	return 0;
 }
 
-static int qmap_stop(struct net_device *pNet)
+static int qmap_stop(struct net_device *dev)
 {
-	netif_carrier_off(pNet);
+    //printk("%s %s %d %d+++\n", __func__, dev->name,
+     //   netif_carrier_ok(dev), netif_queue_stopped(dev));
+
+	netif_carrier_off(dev);
 	return 0;
 }
 
@@ -649,8 +700,8 @@ static void rmnet_vnd_update_tx_stats(struct net_device *net,
 	stats64->tx_bytes += tx_bytes;
 	u64_stats_update_end(&stats64->syncp);
 #else
-	net->stats.rx_packets += tx_packets;
-	net->stats.rx_bytes += tx_bytes;
+	net->stats.tx_packets += tx_packets;
+	net->stats.tx_bytes += tx_bytes;
 #endif
 }
 
@@ -706,6 +757,19 @@ static struct rtnl_link_stats64 *rmnet_vnd_get_stats64(struct net_device *net, s
 #endif
 
 #if defined(QUECTEL_UL_DATA_AGG)
+static void rmnet_usb_tx_wake_queue(unsigned long data) {
+	sQmiWwanQmap *pQmapDev = (void *)data;
+	int i;
+
+	for (i = 0; i < pQmapDev->qmap_mode; i++) {
+		struct net_device *qmap_net = pQmapDev->mpQmapNetDev[i];
+		if (qmap_net) {
+			if (netif_queue_stopped(qmap_net) && !netif_queue_stopped(pQmapDev->mpNetDev->net)) {
+				netif_wake_queue(qmap_net);
+			}
+		}
+	}
+}
 
 static void rmnet_usb_tx_skb_destructor(struct sk_buff *skb) {
 	struct net_device	*net = skb->dev;
@@ -718,9 +782,12 @@ static void rmnet_usb_tx_skb_destructor(struct sk_buff *skb) {
 		
 		for (i = 0; i < pQmapDev->qmap_mode; i++) {
 			struct net_device *qmap_net = pQmapDev->mpQmapNetDev[i];
+
 			if (qmap_net) {
-				if (netif_queue_stopped(qmap_net) && !netif_queue_stopped(net))
-					netif_wake_queue(qmap_net);
+				if (netif_queue_stopped(qmap_net)) {
+					tasklet_schedule(&pQmapDev->txq);
+					break;
+				}
 			}
 		}
 	}
@@ -1128,7 +1195,11 @@ static int qmap_register_device(sQmiWwanQmap * pDev, u8 offset_id)
     priv->dev = pDev->mpNetDev;
     priv->qmap_version = pDev->qmap_version;
     priv->mux_id = QUECTEL_QMAP_MUX_ID + offset_id;
+#if 0 //ANDROID/system/netd/server/NetdConstants.cpp:isIfaceName() do not allow '.'
+    sprintf(qmap_net->name, "%s_%d", real_dev->name, offset_id + 1);
+#else
     sprintf(qmap_net->name, "%s.%d", real_dev->name, offset_id + 1);
+#endif
     qmap_net->netdev_ops = &qmap_netdev_ops;
     memcpy (qmap_net->dev_addr, real_dev->dev_addr, ETH_ALEN);
 
@@ -1228,7 +1299,7 @@ static void qmap_unregister_device(sQmiWwanQmap * pDev, u8 offset_id) {
 		if (priv->agg_skb) {
 			kfree_skb(priv->agg_skb);
 		}
-		spin_unlock_irqrestore(&priv->agg_lock, flags);		
+		spin_unlock_irqrestore(&priv->agg_lock, flags);
 		nss_cb = rcu_dereference(rmnet_nss_callbacks);
 
 #ifdef QUECTEL_BRIDGE_MODE
@@ -1318,6 +1389,16 @@ static int qmap_ndo_do_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 
 	case 0x89F3: //SIOCDEVPRIVATE
 		if (pQmapDev->use_rmnet_usb) {
+			uint i;
+
+			for (i = 0; i < pQmapDev->qmap_mode; i++) {
+				struct net_device *qmap_net = pQmapDev->mpQmapNetDev[i];
+
+				if (!qmap_net)
+					break;
+
+				strcpy(pQmapDev->rmnet_info.ifname[i], qmap_net->name);
+			}
 			rc = copy_to_user(ifr->ifr_ifru.ifru_data, &pQmapDev->rmnet_info, sizeof(pQmapDev->rmnet_info));
 		}
 	break;
@@ -1600,6 +1681,7 @@ skip_pkt:
 			netif_rx(qmap_skb);
 		}
 		else {
+			qmap_skb->protocol = 0;
 			usbnet_skb_return(dev, qmap_skb);
 		}
 	}
@@ -1817,7 +1899,15 @@ static int qmi_wwan_bind(struct usbnet *dev, struct usb_interface *intf)
 
 #if 1 //Added by Quectel
 	if (dev->driver_info->flags & FLAG_NOARP) {
-		dev_info(&intf->dev, "Quectel EC25&EC21&EG91&EG95&EG06&EP06&EM06&EG12&EP12&EM12&EG16&EG18&BG96&AG35 work on RawIP mode\n");
+		int ret;
+		char buf[32] = "Module";
+
+		ret = usb_string(dev->udev, dev->udev->descriptor.iProduct, buf, sizeof(buf));
+		if (ret > 0) {
+			buf[ret] = '\0';
+		}
+
+		dev_info(&intf->dev, "Quectel %s work on RawIP mode\n", buf);
 		dev->net->flags |= IFF_NOARP;
 		dev->net->flags &= ~(IFF_BROADCAST | IFF_MULTICAST);
 
@@ -2326,31 +2416,34 @@ static int qmap_qmi_wwan_probe(struct usb_interface *intf,
 		sQmiWwanQmap *pQmapDev = (sQmiWwanQmap *)info->unused;
 		unsigned i;
 
-		if (pQmapDev) {
-			if (pQmapDev->qmap_mode == 1) {
-				pQmapDev->mpQmapNetDev[0] = dev->net;
-				if (pQmapDev->use_rmnet_usb) {
-					pQmapDev->mpQmapNetDev[0] = NULL;
-					qmap_register_device(pQmapDev, 0);
-				}
-			}
-			else if (pQmapDev->qmap_mode > 1) {
-				for (i = 0; i < pQmapDev->qmap_mode; i++) {
-					qmap_register_device(pQmapDev, i);
-				}
-			}
+		if (!pQmapDev)
+			return status;
 
+		tasklet_init(&pQmapDev->txq, rmnet_usb_tx_wake_queue, (unsigned long)pQmapDev);
+
+		if (pQmapDev->qmap_mode == 1) {
+			pQmapDev->mpQmapNetDev[0] = dev->net;
 			if (pQmapDev->use_rmnet_usb) {
-				rtnl_lock();
-				/* when open hyfi function, run cm will make system crash */
-				//netdev_rx_handler_register(dev->net, rmnet_usb_rx_handler, dev);
-				netdev_rx_handler_register(dev->net, rmnet_usb_rx_handler, NULL);
-				rtnl_unlock();
+				pQmapDev->mpQmapNetDev[0] = NULL;
+				qmap_register_device(pQmapDev, 0);
 			}
+		}
+		else if (pQmapDev->qmap_mode > 1) {
+			for (i = 0; i < pQmapDev->qmap_mode; i++) {
+				qmap_register_device(pQmapDev, i);
+			}
+		}
 
-			if (pQmapDev->link_state == 0) {
-				netif_carrier_off(dev->net);
-			}
+		if (pQmapDev->use_rmnet_usb) {
+			rtnl_lock();
+			/* when open hyfi function, run cm will make system crash */
+			//netdev_rx_handler_register(dev->net, rmnet_usb_rx_handler, dev);
+			netdev_rx_handler_register(dev->net, rmnet_usb_rx_handler, NULL);
+			rtnl_unlock();
+		}
+
+		if (pQmapDev->link_state == 0) {
+			netif_carrier_off(dev->net);
 		}
 	}
 
@@ -2388,6 +2481,8 @@ static void qmap_qmi_wwan_disconnect(struct usb_interface *intf)
 		netdev_rx_handler_unregister(dev->net);
 		rtnl_unlock();
 	}
+
+	tasklet_kill(&pQmapDev->txq);
 	
 	usbnet_disconnect(intf);
 	info->unused = 0;
@@ -2398,9 +2493,7 @@ static void qmap_qmi_wwan_disconnect(struct usb_interface *intf)
 static struct usb_driver qmi_wwan_driver = {
 	.name		      = "qmi_wwan_q",
 	.id_table	      = products,
-#if 0 /* Victor, 2020/7/28, this line is not need, will be replace following */
 	.probe		      = qmi_wwan_probe,
-#endif
 #if defined(QUECTEL_WWAN_QMAP)
 	.probe		      = qmap_qmi_wwan_probe,
 	.disconnect	      = qmap_qmi_wwan_disconnect,
@@ -2411,12 +2504,7 @@ static struct usb_driver qmi_wwan_driver = {
 	.suspend	      = qmi_wwan_suspend,
 	.resume		      =	qmi_wwan_resume,
 	.reset_resume         = qmi_wwan_reset_resume,
-#if 0 /* 
-       * Fix me :
-       * Victor, 2020/7/28, this will let imx8mq kernel error
-       */
 	.supports_autosuspend = 1,
-#endif
 	.disable_hub_initiated_lpm = 1,
 };
 

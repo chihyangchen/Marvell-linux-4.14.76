@@ -324,6 +324,19 @@ static int xhci_plat_probe(struct platform_device *pdev)
 	 */
 	pm_runtime_forbid(&pdev->dev);
 
+#ifdef VICTOR_USB3_PATCH
+	{
+	extern void xhci_irq_polling(unsigned long data);
+	setup_timer(&xhci->irq_polling_timer, xhci_irq_polling, 
+			(unsigned long)hcd);
+	#ifdef XHCI_IRQ_POLLING_MSECS
+	xhci->irq_polling_timer.expires = jiffies + 
+			msecs_to_jiffies(XHCI_IRQ_POLLING_MSECS);
+	add_timer(&xhci->irq_polling_timer);
+	#endif
+	}
+#endif
+
 	return 0;
 
 
@@ -358,6 +371,10 @@ static int xhci_plat_remove(struct platform_device *dev)
 	struct xhci_hcd	*xhci = hcd_to_xhci(hcd);
 	struct clk *clk = xhci->clk;
 	struct clk *reg_clk = xhci->reg_clk;
+
+#ifdef VICTOR_USB3_PATCH
+	del_timer(&xhci->irq_polling_timer);
+#endif
 
 	xhci->xhc_state |= XHCI_STATE_REMOVING;
 

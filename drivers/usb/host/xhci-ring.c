@@ -172,13 +172,13 @@ static void inc_deq(struct xhci_hcd *xhci, struct xhci_ring *ring)
 	if (ring->type == TYPE_EVENT) {
 		if (!last_trb_on_seg(ring->deq_seg, ring->dequeue)) {
 			ring->dequeue++;
-			return;
+			goto out;
 		}
 		if (last_trb_on_ring(ring, ring->deq_seg, ring->dequeue))
 			ring->cycle_state ^= 1;
 		ring->deq_seg = ring->deq_seg->next;
 		ring->dequeue = ring->deq_seg->trbs;
-		return;
+		goto out;
 	}
 
 	/* All other rings have link trbs */
@@ -191,6 +191,7 @@ static void inc_deq(struct xhci_hcd *xhci, struct xhci_ring *ring)
 		ring->dequeue = ring->deq_seg->trbs;
 	}
 
+out:
 	trace_xhci_inc_deq(ring);
 
 	return;
@@ -678,11 +679,19 @@ static void xhci_unmap_td_bounce_buffer(struct xhci_hcd *xhci,
 		return;
 	}
 
+#ifdef SEG_DMA_PATCH /* patched from kernel CIP 4.19.140 */
+	dma_unmap_single(dev, seg->bounce_dma, ring->bounce_buf_len,
+			DMA_FROM_DEVICE);
+	/* for in tranfers we need to copy the data from bounce to sg */
+	sg_pcopy_from_buffer(urb->sg, urb->num_sgs, seg->bounce_buf,
+				seg->bounce_len, seg->bounce_offs);
+#else
 	/* for in tranfers we need to copy the data from bounce to sg */
 	sg_pcopy_from_buffer(urb->sg, urb->num_mapped_sgs, seg->bounce_buf,
 			     seg->bounce_len, seg->bounce_offs);
 	dma_unmap_single(dev, seg->bounce_dma, ring->bounce_buf_len,
 			 DMA_FROM_DEVICE);
+#endif
 	seg->bounce_len = 0;
 	seg->bounce_offs = 0;
 }
@@ -1451,6 +1460,9 @@ static void handle_cmd_completion(struct xhci_hcd *xhci,
 	case TRB_STOP_RING:
 		WARN_ON(slot_id != TRB_TO_SLOT_ID(
 				le32_to_cpu(cmd_trb->generic.field[3])));
+#if 1 /* patch from kernel CIP 4.19.140 */
+		if (!cmd->completion)
+#endif
 		xhci_handle_cmd_stop_ep(xhci, slot_id, cmd_trb, event);
 		break;
 	case TRB_SET_DEQ:
@@ -2560,6 +2572,8 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 				trb_in_td(xhci, ep_ring->deq_seg,
 					  ep_ring->dequeue, td->last_trb,
 					  ep_trb_dma, true);
+				printk("Victor:%s,%s,%d: ep_type=%s,first ring=%p,last ring=%p,num ring=%d\n", __FILE__, __FUNCTION__, __LINE__, xhci_ep_type_string(CTX_TO_EP_TYPE(ep_ctx->ep_info2)), ep_ring->first_seg, ep_ring->last_seg, ep_ring->num_segs);
+				printk("Victor:%s,%s,%d:enqueue=%p,dequeue=%p,enq ring=%p,deq ring=%p\n", __FILE__, __FUNCTION__, __LINE__, ep_ring->enqueue, ep_ring->dequeue, ep_ring->enq_seg, ep_ring->deq_seg);
 				return -ESHUTDOWN;
 			}
 
@@ -2655,7 +2669,7 @@ static int xhci_handle_event(struct xhci_hcd *xhci)
 {
 	union xhci_trb *event;
 	int update_ptrs = 1;
-	int ret;
+	int ret=1;
 
 	/* Event ring hasn't been allocated yet. */
 	if (!xhci->event_ring || !xhci->event_ring->dequeue) {
@@ -2698,9 +2712,16 @@ static int xhci_handle_event(struct xhci_hcd *xhci)
 		    TRB_TYPE(48))
 			handle_vendor_event(xhci, event);
 		else
+#ifdef UPDATE_HC_DEQUEUE_REG
+			{
+#endif
 			xhci_warn(xhci, "ERROR unknown event type %d\n",
 				  TRB_FIELD_TO_TYPE(
 				  le32_to_cpu(event->event_cmd.flags)));
+#ifdef UPDATE_HC_DEQUEUE_REG
+			ret = UPDATE_HC_DEQUEUE_REG;
+			}
+#endif
 	}
 	/* Any of the above functions may drop and re-acquire the lock, so check
 	 * to make sure a watchdog timer didn't mark the host as non-responsive.
@@ -2718,21 +2739,86 @@ static int xhci_handle_event(struct xhci_hcd *xhci)
 	/* Are there more items on the event ring?  Caller will call us again to
 	 * check.
 	 */
+#ifdef UPDATE_HC_DEQUEUE_REG
+	if ( ret == UPDATE_HC_DEQUEUE_REG )
+		return ret;
+#endif
+#ifdef HANDLE_EVENT_SHUTDOWN
+	if ( ret == -ESHUTDOWN )
+		return ret;
+#endif
 	return 1;
 }
+
+#ifdef EVENT_RING_PATCH
+/*
+ * Update event ring dequeue pointer:
+ * when all events have finished to avoid "Event Ring Full Error" condition
+ */
+//#define ALWAYS_UPDATE_DEQUEUE 1
+static void xhci_update_erst_dequeue(struct xhci_hcd *xhci,
+	union xhci_trb *event_ring_deq)
+{
+	u64 temp_64;
+	dma_addr_t deq;
+
+	temp_64 = xhci_read_64(xhci, &xhci->ir_set->erst_dequeue);
+
+	/* if necessary, update the HW's version of the event ring deq ptr */
+	if ( event_ring_deq != xhci->event_ring->dequeue ) {
+		deq = xhci_trb_virt_to_dma(xhci->event_ring->deq_seg,
+				xhci->event_ring->dequeue);
+		if ( deq == 0 )
+			xhci_warn(xhci, "WARN something wrong with SW event ring dequeue ptr\n");
+			/*
+			 * Per 4.9.4 software writes to the ERDP register shall
+			 * always advance the Event Ring Dequeue Pointer value.
+			 */
+		if ( (temp_64 & (u64)~ERST_PTR_MASK) ==
+		     ((u64)deq & (u64)~ERST_PTR_MASK) )
+			return;
+
+		/* update HC event ring dequeue pointer */
+		temp_64 &= ERST_PTR_MASK;
+		temp_64 |= ((u64)deq & (u64)~ERST_PTR_MASK);
+#ifndef ALWAYS_UPDATE_DEQUEUE
+		/* clear the event handler busy flag (RW1C) */
+		temp_64 |= ERST_EHB;
+		xhci_write_64(xhci, temp_64, &xhci->ir_set->erst_dequeue);
+#endif
+	}
+
+#ifdef ALWAYS_UPDATE_DEQUEUE
+	/* clear the event handler busy flag (RW1C) */
+	temp_64 |= ERST_EHB;
+	xhci_write_64(xhci, temp_64, &xhci->ir_set->erst_dequeue);
+#endif
+}
+#endif /* EVENT_RING_PATCH */
 
 /*
  * xHCI spec says we can get an interrupt, and if the HC has an error condition,
  * we might get bad data out of the event ring.  Section 4.10.2.7 has a list of
  * indicators of an event TRB error, but we check the status *first* to be safe.
  */
+#define LOOP_CHECK_COUNT TRBS_PER_SEGMENT/3
 irqreturn_t xhci_irq(struct usb_hcd *hcd)
 {
 	struct xhci_hcd *xhci = hcd_to_xhci(hcd);
 	union xhci_trb *event_ring_deq;
 	irqreturn_t ret = IRQ_NONE;
 	unsigned long flags;
+#ifdef EVENT_RING_PATCH
+	int event_loop=0;
+#else
 	dma_addr_t deq;
+#endif
+#ifdef XHCI_IRQ_MAX_USED_MSECS
+	unsigned long time;
+#endif
+#ifdef UPDATE_HC_DEQUEUE_REG
+	int handle_ret;
+#endif
 	u64 temp_64;
 	u32 status;
 
@@ -2788,7 +2874,24 @@ irqreturn_t xhci_irq(struct usb_hcd *hcd)
 	/* FIXME this should be a delayed service routine
 	 * that clears the EHB.
 	 */
-	while (xhci_handle_event(xhci) > 0) {}
+#ifndef EVENT_RING_PATCH
+	#ifdef XHCI_IRQ_MAX_USED_MSECS
+	time = jiffies + msecs_to_jiffies(XHCI_IRQ_MAX_USED_MSECS);
+	#endif
+	#ifdef UPDATE_HC_DEQUEUE_REG
+	while ( (handle_ret=xhci_handle_event(xhci)) > 0 ) {
+		if ( handle_ret == UPDATE_HC_DEQUEUE_REG )
+			break;
+	#else
+	while (xhci_handle_event(xhci) > 0) {
+	#endif
+	#ifdef XHCI_IRQ_MAX_USED_MSECS
+		if ( time_after(jiffies, time) ) {
+			printk("Victor:%s,%s,%d:take too more time %d in interrupt !\n", __FILE__, __FUNCTION__, __LINE__, XHCI_IRQ_MAX_USED_MSECS);
+			break;
+		}
+	#endif
+	}
 
 	temp_64 = xhci_read_64(xhci, &xhci->ir_set->erst_dequeue);
 	/* If necessary, update the HW's version of the event ring deq ptr. */
@@ -2801,11 +2904,48 @@ irqreturn_t xhci_irq(struct usb_hcd *hcd)
 		/* Update HC event ring dequeue pointer */
 		temp_64 &= ERST_PTR_MASK;
 		temp_64 |= ((u64) deq & (u64) ~ERST_PTR_MASK);
+	#ifndef ALWAYS_UPDATE_DEQUEUE
+		temp_64 |= ERST_EHB;
+		xhci_write_64(xhci, temp_64, &xhci->ir_set->erst_dequeue);
+	#endif
 	}
 
 	/* Clear the event handler busy flag (RW1C); event ring is empty. */
+	#ifdef ALWAYS_UPDATE_DEQUEUE
 	temp_64 |= ERST_EHB;
 	xhci_write_64(xhci, temp_64, &xhci->ir_set->erst_dequeue);
+	#endif
+#else
+	#ifdef XHCI_IRQ_MAX_USED_MSECS
+	time = jiffies + msecs_to_jiffies(XHCI_IRQ_MAX_USED_MSECS);
+	#endif
+	#ifdef UPDATE_HC_DEQUEUE_REG
+	while ( (handle_ret=xhci_handle_event(xhci)) > 0 ) {
+		if ( handle_ret == UPDATE_HC_DEQUEUE_REG ||
+		     ++event_loop >= LOOP_CHECK_COUNT ) {
+			xhci_update_erst_dequeue(xhci, event_ring_deq);
+			event_ring_deq = xhci->event_ring->dequeue;
+			event_loop = 0;
+		}
+		if ( handle_ret == UPDATE_HC_DEQUEUE_REG )
+			break;
+	#else
+	while ( xhci_handle_event(xhci) > 0) {
+		if ( ++event_loop >= LOOP_CHECK_COUNT ) {
+			xhci_update_erst_dequeue(xhci, event_ring_deq);
+			event_ring_deq = xhci->event_ring->dequeue;
+			event_loop = 0;
+		}
+	#endif
+	#ifdef XHCI_IRQ_MAX_USED_MSECS
+		if ( time_after(jiffies, time) ) {
+			printk("Victor:%s,%s,%d:take too more time %d in interrupt !\n", __FILE__, __FUNCTION__, __LINE__, XHCI_IRQ_MAX_USED_MSECS);
+			break;
+		}
+	#endif
+	}
+	xhci_update_erst_dequeue(xhci, event_ring_deq);
+#endif /* EVENT_RING_PATCH */
 	ret = IRQ_HANDLED;
 
 out:
@@ -2813,6 +2953,115 @@ out:
 
 	return ret;
 }
+
+#ifdef VICTOR_USB3_PATCH
+#ifndef XHCI_IRQ_POLLING_ACK_IRQ
+static irqreturn_t xhci_irq_no_ack(struct usb_hcd *hcd)
+{
+	struct xhci_hcd *xhci = hcd_to_xhci(hcd);
+	union xhci_trb *event_ring_deq;
+	irqreturn_t ret = IRQ_NONE;
+	unsigned long flags;
+	int event_loop=0;
+	int handle_ret;
+#ifdef XHCI_IRQ_MAX_USED_MSECS
+	unsigned long time;
+#endif
+	u64 temp_64;
+	u32 status;
+
+	spin_lock_irqsave(&xhci->lock, flags);
+	status = readl(&xhci->op_regs->status);
+	if (status == ~(u32)0) {
+		xhci_hc_died(xhci);
+		ret = IRQ_HANDLED;
+		goto out;
+	}
+
+	if (status & STS_FATAL) {
+		xhci_warn(xhci, "WARNING: Host System Error\n");
+		xhci_halt(xhci);
+		ret = IRQ_HANDLED;
+		goto out;
+	}
+
+	if (xhci->xhc_state & XHCI_STATE_DYING ||
+	    xhci->xhc_state & XHCI_STATE_HALTED) {
+		xhci_dbg(xhci, "xHCI dying, ignoring interrupt. "
+				"Shouldn't IRQs be disabled?\n");
+		/* Clear the event handler busy flag (RW1C);
+		 * the event ring should be empty.
+		 */
+		temp_64 = xhci_read_64(xhci, &xhci->ir_set->erst_dequeue);
+		xhci_write_64(xhci, temp_64 | ERST_EHB,
+				&xhci->ir_set->erst_dequeue);
+		ret = IRQ_HANDLED;
+		goto out;
+	}
+
+	event_ring_deq = xhci->event_ring->dequeue;
+	/* FIXME this should be a delayed service routine
+	 * that clears the EHB.
+	 */
+	#ifdef XHCI_IRQ_MAX_USED_MSECS
+	time = jiffies + msecs_to_jiffies(XHCI_IRQ_MAX_USED_MSECS);
+	#endif
+	#ifdef UPDATE_HC_DEQUEUE_REG
+	while ( (handle_ret=xhci_handle_event(xhci)) > 0 ) {
+		if ( handle_ret == UPDATE_HC_DEQUEUE_REG ||
+		     ++event_loop >= LOOP_CHECK_COUNT ) {
+			xhci_update_erst_dequeue(xhci, event_ring_deq);
+			event_ring_deq = xhci->event_ring->dequeue;
+			event_loop = 0;
+		}
+		if ( handle_ret == UPDATE_HC_DEQUEUE_REG ) 
+			break;
+	#else
+	while ( xhci_handle_event(xhci) > 0) {
+		if ( ++event_loop >= LOOP_CHECK_COUNT ) {
+			xhci_update_erst_dequeue(xhci, event_ring_deq);
+			event_ring_deq = xhci->event_ring->dequeue;
+			event_loop = 0;
+		}
+	#endif
+	#ifdef XHCI_IRQ_MAX_USED_MSECS
+		if ( time_after(jiffies, time) ) {
+			printk("Victor:%s,%s,%d:take too more time %d in interrupt !\n", __FILE__, __FUNCTION__, __LINE__, XHCI_IRQ_MAX_USED_MSECS);
+			break;
+		}
+	#endif
+	}
+	xhci_update_erst_dequeue(xhci, event_ring_deq);
+	ret = IRQ_HANDLED;
+
+out:
+	spin_unlock_irqrestore(&xhci->lock, flags);
+
+	return ret;
+}
+#endif /* !XHCI_IRQ_POLLING_ACK_IRQ */
+
+void xhci_irq_polling(unsigned long data)
+{
+	struct usb_hcd *hcd;
+	struct xhci_hcd *xhci;
+
+	hcd = (struct usb_hcd *)data;
+	xhci = hcd_to_xhci(hcd);
+	del_timer(&xhci->irq_polling_timer);
+#if XHCI_IRQ_POLLING_ACK_IRQ
+	xhci_irq(hcd);
+#else
+	xhci_irq_no_ack(hcd); /* not ack interrupt */
+#endif
+#ifdef XHCI_IRQ_POLLING_MSECS
+	xhci->irq_polling_timer.expires = jiffies + 
+		msecs_to_jiffies(XHCI_IRQ_POLLING_MSECS);
+	add_timer(&xhci->irq_polling_timer);
+#endif
+}
+EXPORT_SYMBOL(xhci_irq_polling);
+#endif
 
 irqreturn_t xhci_msi_irq(int irq, void *hcd)
 {
@@ -3180,8 +3429,13 @@ static int xhci_align_td(struct xhci_hcd *xhci, struct urb *urb, u32 enqd_len,
 
 	/* create a max max_pkt sized bounce buffer pointed to by last trb */
 	if (usb_urb_dir_out(urb)) {
+#ifdef SEG_DMA_PATCH /* patch from kernel CIP 4.19.140 */
+		sg_pcopy_to_buffer(urb->sg, urb->num_sgs,
+				   seg->bounce_buf, new_buff_len, enqd_len);
+#else
 		sg_pcopy_to_buffer(urb->sg, urb->num_mapped_sgs,
 				   seg->bounce_buf, new_buff_len, enqd_len);
+#endif
 		seg->bounce_dma = dma_map_single(dev, seg->bounce_buf,
 						 max_pkt, DMA_TO_DEVICE);
 	} else {
