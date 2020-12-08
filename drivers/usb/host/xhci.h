@@ -1877,13 +1877,13 @@ struct xhci_hcd {
 
 	/* how max time in handle event ring interrupt while loop
 	 * mask it will not do it */
-//#define XHCI_IRQ_MAX_USED_MSECS 20
+#define XHCI_IRQ_MAX_USED_MSECS 20
 
 	/* to change event ring dequeue when HC event type 37 happened, this 
 	 * value must be > 1
 	 * mask it will not do it */
 #define UPDATE_HC_DEQUEUE_REG 5 
-#define HANDLE_EVENT_SHUTDOWN 1
+//#define HANDLE_EVENT_SHUTDOWN 1
 
 //#define VICTOR_USB3_PATCH 1
 #ifdef VICTOR_USB3_PATCH

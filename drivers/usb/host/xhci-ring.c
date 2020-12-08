@@ -2718,6 +2718,7 @@ static int xhci_handle_event(struct xhci_hcd *xhci)
 			xhci_warn(xhci, "ERROR unknown event type %d\n",
 				  TRB_FIELD_TO_TYPE(
 				  le32_to_cpu(event->event_cmd.flags)));
+			printk("Victor:%s,%s,%d:trb comp type=%d\n", __FILE__, __FUNCTION__, __LINE__, GET_COMP_CODE(le32_to_cpu(event->event_cmd.status)));
 #ifdef UPDATE_HC_DEQUEUE_REG
 			ret = UPDATE_HC_DEQUEUE_REG;
 			}
@@ -2755,7 +2756,7 @@ static int xhci_handle_event(struct xhci_hcd *xhci)
  * Update event ring dequeue pointer:
  * when all events have finished to avoid "Event Ring Full Error" condition
  */
-//#define ALWAYS_UPDATE_DEQUEUE 1
+#define ALWAYS_UPDATE_DEQUEUE 1
 static void xhci_update_erst_dequeue(struct xhci_hcd *xhci,
 	union xhci_trb *event_ring_deq)
 {
@@ -2927,8 +2928,8 @@ irqreturn_t xhci_irq(struct usb_hcd *hcd)
 			event_ring_deq = xhci->event_ring->dequeue;
 			event_loop = 0;
 		}
-		if ( handle_ret == UPDATE_HC_DEQUEUE_REG )
-			break;
+		//if ( handle_ret == UPDATE_HC_DEQUEUE_REG )
+		//	break;
 	#else
 	while ( xhci_handle_event(xhci) > 0) {
 		if ( ++event_loop >= LOOP_CHECK_COUNT ) {
@@ -3014,8 +3015,8 @@ static irqreturn_t xhci_irq_no_ack(struct usb_hcd *hcd)
 			event_ring_deq = xhci->event_ring->dequeue;
 			event_loop = 0;
 		}
-		if ( handle_ret == UPDATE_HC_DEQUEUE_REG ) 
-			break;
+		//if ( handle_ret == UPDATE_HC_DEQUEUE_REG ) 
+		//	break;
 	#else
 	while ( xhci_handle_event(xhci) > 0) {
 		if ( ++event_loop >= LOOP_CHECK_COUNT ) {
