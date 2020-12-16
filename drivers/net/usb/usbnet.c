@@ -440,12 +440,16 @@ static enum skb_state defer_bh(struct usbnet *dev, struct sk_buff *skb,
 	 * spin_lock_nested() tells lockdep that it is OK to take
 	 * dev->done.lock here with list->lock held.
 	 */
+#if 0 /* Victor, 2020/12/14, I don't why need to do this ? */
 	spin_lock_nested(&dev->done.lock, SINGLE_DEPTH_NESTING);
+#endif
 
 	__skb_queue_tail(&dev->done, skb);
 	if (dev->done.qlen == 1)
 		tasklet_schedule(&dev->bh);
+#if 0 /* Victor, 2020/12/14, I don't why need to do this ? */
 	spin_unlock(&dev->done.lock);
+#endif
 	spin_unlock_irqrestore(&list->lock, flags);
 	return old_state;
 }
@@ -503,6 +507,15 @@ static int rx_submit (struct usbnet *dev, struct urb *urb, gfp_t flags)
 
 	usb_fill_bulk_urb (urb, dev->udev, dev->in,
 		skb->data, size, rx_complete, skb);
+
+#if 0 /* Victor, 2020/12/9 */
+ 	/* 2020/12/11: this action will let kernel panic */
+	{
+	struct usb_device_descriptor *desc = &dev->udev->descriptor;
+	if (desc->idVendor == cpu_to_le16(0x2C7C))
+		urb->transfer_flags |= URB_ZERO_PACKET;
+	}
+#endif
 
 	spin_lock_irqsave (&dev->rxq.lock, lockflags);
 
@@ -1413,6 +1426,13 @@ netdev_tx_t usbnet_start_xmit (struct sk_buff *skb,
 		} else
 			urb->transfer_flags |= URB_ZERO_PACKET;
 	}
+#if 1 /* Victor, 2020/12/9 */
+	{
+	struct usb_device_descriptor *desc = &dev->udev->descriptor;
+	if (desc->idVendor == cpu_to_le16(0x2C7C))
+		urb->transfer_flags |= URB_ZERO_PACKET;
+	}
+#endif
 	urb->transfer_buffer_length = length;
 
 	if (info->flags & FLAG_MULTI_PACKET) {
@@ -1849,17 +1869,32 @@ EXPORT_SYMBOL_GPL(usbnet_probe);
 int usbnet_suspend (struct usb_interface *intf, pm_message_t message)
 {
 	struct usbnet		*dev = usb_get_intfdata(intf);
+#if 1 /* Victor, 2020/12/10 */
+	unsigned long flags;
+#endif
 
 	if (!dev->suspend_count++) {
+#if 1 /* Victor, 2020/12/10 */
+		spin_lock_irqsave(&dev->txq.lock, flags);
+#else
 		spin_lock_irq(&dev->txq.lock);
+#endif
 		/* don't autosuspend while transmitting */
 		if (dev->txq.qlen && PMSG_IS_AUTO(message)) {
 			dev->suspend_count--;
+#if 1 /* Victor, 2020/12/10 */
+			spin_unlock_irqrestore(&dev->txq.lock, flags);
+#else
 			spin_unlock_irq(&dev->txq.lock);
+#endif
 			return -EBUSY;
 		} else {
 			set_bit(EVENT_DEV_ASLEEP, &dev->flags);
+#if 1 /* Victor, 2020/12/10 */
+			spin_unlock_irqrestore(&dev->txq.lock, flags);
+#else
 			spin_unlock_irq(&dev->txq.lock);
+#endif
 		}
 		/*
 		 * accelerate emptying of the rx and queues, to avoid
@@ -1885,12 +1920,19 @@ int usbnet_resume (struct usb_interface *intf)
 	struct sk_buff          *skb;
 	struct urb              *res;
 	int                     retval;
+#if 1 /* Victor, 2020/12/10 */
+	unsigned long flags;
+#endif
 
 	if (!--dev->suspend_count) {
 		/* resume interrupt URB if it was previously submitted */
 		__usbnet_status_start_force(dev, GFP_NOIO);
 
+#if 1 /* Victor, 2020/12/10 */
+		spin_lock_irqsave(&dev->txq.lock, flags);
+#else
 		spin_lock_irq(&dev->txq.lock);
+#endif
 		while ((res = usb_get_from_anchor(&dev->deferred))) {
 
 			skb = (struct sk_buff *)res->context;
@@ -1908,7 +1950,11 @@ int usbnet_resume (struct usb_interface *intf)
 
 		smp_mb();
 		clear_bit(EVENT_DEV_ASLEEP, &dev->flags);
+#if 1 /* Victor, 2020/12/10 */
+		spin_unlock_irqrestore(&dev->txq.lock, flags);
+#else
 		spin_unlock_irq(&dev->txq.lock);
+#endif
 
 		if (test_bit(EVENT_DEV_OPEN, &dev->flags)) {
 			/* handle remote wakeup ASAP

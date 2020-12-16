@@ -665,6 +665,9 @@ static void xhci_stop(struct usb_hcd *hcd)
 {
 	u32 temp;
 	struct xhci_hcd *xhci = hcd_to_xhci(hcd);
+#ifdef VICTOR_XHCI_PATCH
+	unsigned long flags;
+#endif
 
 	mutex_lock(&xhci->mutex);
 
@@ -676,12 +679,20 @@ static void xhci_stop(struct usb_hcd *hcd)
 		return;
 	}
 
+#ifdef VICTOR_XHCI_PATCH
+	spin_lock_irqsave(&xhci->lock, flags);
+#else
 	spin_lock_irq(&xhci->lock);
+#endif
 	xhci->xhc_state |= XHCI_STATE_HALTED;
 	xhci->cmd_ring_state = CMD_RING_STATE_STOPPED;
 	xhci_halt(xhci);
 	xhci_reset(xhci);
+#ifdef VICTOR_XHCI_PATCH
+	spin_unlock_irqrestore(&xhci->lock, flags);
+#else
 	spin_unlock_irq(&xhci->lock);
+#endif
 
 	xhci_cleanup_msix(xhci);
 
@@ -725,16 +736,27 @@ static void xhci_stop(struct usb_hcd *hcd)
 static void xhci_shutdown(struct usb_hcd *hcd)
 {
 	struct xhci_hcd *xhci = hcd_to_xhci(hcd);
+#ifdef VICTOR_XHCI_PATCH
+	unsigned long flags;
+#endif
 
 	if (xhci->quirks & XHCI_SPURIOUS_REBOOT)
 		usb_disable_xhci_ports(to_pci_dev(hcd->self.sysdev));
 
+#ifdef VICTOR_XHCI_PATCH
+	spin_lock_irqsave(&xhci->lock, flags);
+#else
 	spin_lock_irq(&xhci->lock);
+#endif
 	xhci_halt(xhci);
 	/* Workaround for spurious wakeups at shutdown with HSW */
 	if (xhci->quirks & XHCI_SPURIOUS_WAKEUP)
 		xhci_reset(xhci);
+#ifdef VICTOR_XHCI_PATCH
+	spin_unlock_irqrestore(&xhci->lock, flags);
+#else
 	spin_unlock_irq(&xhci->lock);
+#endif
 
 	xhci_cleanup_msix(xhci);
 
@@ -919,6 +941,9 @@ int xhci_suspend(struct xhci_hcd *xhci, bool do_wakeup)
 	unsigned int		delay = XHCI_MAX_HALT_USEC;
 	struct usb_hcd		*hcd = xhci_to_hcd(xhci);
 	u32			command;
+#ifdef VICTOR_XHCI_PATCH
+	unsigned long flags;
+#endif
 
 	if (!hcd->state)
 		return 0;
@@ -941,7 +966,11 @@ int xhci_suspend(struct xhci_hcd *xhci, bool do_wakeup)
 	if (xhci->quirks & XHCI_SUSPEND_DELAY)
 		usleep_range(1000, 1500);
 
+#ifdef VICTOR_XHCI_PATCH
+	spin_lock_irqsave(&xhci->lock, flags);
+#else
 	spin_lock_irq(&xhci->lock);
+#endif
 	clear_bit(HCD_FLAG_HW_ACCESSIBLE, &hcd->flags);
 	clear_bit(HCD_FLAG_HW_ACCESSIBLE, &xhci->shared_hcd->flags);
 	/* step 1: stop endpoint */
@@ -958,7 +987,11 @@ int xhci_suspend(struct xhci_hcd *xhci, bool do_wakeup)
 	if (xhci_handshake(&xhci->op_regs->status,
 		      STS_HALT, STS_HALT, delay)) {
 		xhci_warn(xhci, "WARN: xHC CMD_RUN timeout\n");
+#ifdef VICTOR_XHCI_PATCH
+		spin_unlock_irqrestore(&xhci->lock, flags);
+#else
 		spin_unlock_irq(&xhci->lock);
+#endif
 		return -ETIMEDOUT;
 	}
 	xhci_clear_command_ring(xhci);
@@ -973,10 +1006,18 @@ int xhci_suspend(struct xhci_hcd *xhci, bool do_wakeup)
 	if (xhci_handshake(&xhci->op_regs->status,
 				STS_SAVE, 0, 10 * 1000)) {
 		xhci_warn(xhci, "WARN: xHC save state timeout\n");
+#ifdef VICTOR_XHCI_PATCH
+		spin_unlock_irqrestore(&xhci->lock, flags);
+#else
 		spin_unlock_irq(&xhci->lock);
+#endif
 		return -ETIMEDOUT;
 	}
+#ifdef VICTOR_XHCI_PATCH
+	spin_unlock_irqrestore(&xhci->lock, flags);
+#else
 	spin_unlock_irq(&xhci->lock);
+#endif
 
 	/*
 	 * Deleting Compliance Mode Recovery Timer because the xHCI Host
@@ -1011,6 +1052,9 @@ int xhci_resume(struct xhci_hcd *xhci, bool hibernated)
 	struct usb_hcd		*secondary_hcd;
 	int			retval = 0;
 	bool			comp_timer_running = false;
+#ifdef VICTOR_XHCI_PATCH
+	unsigned long flags;
+#endif
 
 	if (!hcd->state)
 		return 0;
@@ -1026,7 +1070,11 @@ int xhci_resume(struct xhci_hcd *xhci, bool hibernated)
 	set_bit(HCD_FLAG_HW_ACCESSIBLE, &hcd->flags);
 	set_bit(HCD_FLAG_HW_ACCESSIBLE, &xhci->shared_hcd->flags);
 
+#ifdef VICTOR_XHCI_PATCH
+	spin_lock_irqsave(&xhci->lock, flags);
+#else
 	spin_lock_irq(&xhci->lock);
+#endif
 	if (xhci->quirks & XHCI_RESET_ON_RESUME)
 		hibernated = true;
 
@@ -1048,7 +1096,11 @@ int xhci_resume(struct xhci_hcd *xhci, bool hibernated)
 		if (xhci_handshake(&xhci->op_regs->status,
 			      STS_RESTORE, 0, 100 * 1000)) {
 			xhci_warn(xhci, "WARN: xHC restore state timeout\n");
+#ifdef VICTOR_XHCI_PATCH
+			spin_unlock_irqrestore(&xhci->lock, flags);
+#else
 			spin_unlock_irq(&xhci->lock);
+#endif
 			return -ETIMEDOUT;
 		}
 		temp = readl(&xhci->op_regs->status);
@@ -1071,7 +1123,11 @@ int xhci_resume(struct xhci_hcd *xhci, bool hibernated)
 		xhci_dbg(xhci, "Stop HCD\n");
 		xhci_halt(xhci);
 		xhci_reset(xhci);
+#ifdef VICTOR_XHCI_PATCH
+		spin_unlock_irqrestore(&xhci->lock, flags);
+#else
 		spin_unlock_irq(&xhci->lock);
+#endif
 		xhci_cleanup_msix(xhci);
 
 		xhci_dbg(xhci, "// Disabling event ring interrupts\n");
@@ -1128,7 +1184,11 @@ int xhci_resume(struct xhci_hcd *xhci, bool hibernated)
 	 * Running endpoints by ringing their doorbells
 	 */
 
+#ifdef VICTOR_XHCI_PATCH
+	spin_unlock_irqrestore(&xhci->lock, flags);
+#else
 	spin_unlock_irq(&xhci->lock);
+#endif
 
  done:
 	if (retval == 0) {

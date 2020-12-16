@@ -1868,8 +1868,12 @@ struct xhci_hcd {
 #define COMP_MODE_RCVRY_MSECS 2000
 
 	/* follow to add by Victor 2020/11/27 */
+#define VICTOR_XHCI_PATCH 1
+
 	/* segment DMA mapping patch from CIP kernel 4.19.140 */
+/* this patch will let system stuck 2020/12/12
 #define SEG_DMA_PATCH 1
+*/
 
 	/* patch HC event ring maintain issue, it is patched from kernel 5.x
          * mask it will not do it */
@@ -1877,7 +1881,9 @@ struct xhci_hcd {
 
 	/* how max time in handle event ring interrupt while loop
 	 * mask it will not do it */
+/* 2020/12/11, it is never happened, so this patch do nothing 
 #define XHCI_IRQ_MAX_USED_MSECS 20
+*/
 
 	/* to change event ring dequeue when HC event type 37 happened, this 
 	 * value must be > 1

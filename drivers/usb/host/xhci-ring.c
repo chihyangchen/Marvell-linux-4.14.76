@@ -2760,6 +2760,24 @@ static int xhci_handle_event(struct xhci_hcd *xhci)
 static void xhci_update_erst_dequeue(struct xhci_hcd *xhci,
 	union xhci_trb *event_ring_deq)
 {
+#if 1
+	u64 temp_64;
+	dma_addr_t deq;
+
+#ifdef ALWAYS_UPDATE_DEQUEUE
+	{
+#else
+	if ( event_ring_deq != xhci->event_ring->dequeue ) {
+#endif
+		deq = xhci_trb_virt_to_dma( xhci->event_ring->deq_seg,
+				xhci->event_ring->dequeue);
+		if ( deq == 0 )
+			xhci_warn(xhci, "WARN something wrong with SW event ring dequeue ptr\n");
+		temp_64 = ((u64)deq & (u64)~ERST_PTR_MASK);
+		temp_64 |= ERST_EHB;
+		xhci_write_64(xhci, temp_64, &xhci->ir_set->erst_dequeue);
+	}
+#else
 	u64 temp_64;
 	dma_addr_t deq;
 
@@ -2794,6 +2812,7 @@ static void xhci_update_erst_dequeue(struct xhci_hcd *xhci,
 	temp_64 |= ERST_EHB;
 	xhci_write_64(xhci, temp_64, &xhci->ir_set->erst_dequeue);
 #endif
+#endif
 }
 #endif /* EVENT_RING_PATCH */
 
@@ -2802,7 +2821,7 @@ static void xhci_update_erst_dequeue(struct xhci_hcd *xhci,
  * we might get bad data out of the event ring.  Section 4.10.2.7 has a list of
  * indicators of an event TRB error, but we check the status *first* to be safe.
  */
-#define LOOP_CHECK_COUNT TRBS_PER_SEGMENT/3
+#define LOOP_CHECK_COUNT TRBS_PER_SEGMENT/4
 irqreturn_t xhci_irq(struct usb_hcd *hcd)
 {
 	struct xhci_hcd *xhci = hcd_to_xhci(hcd);
@@ -2928,8 +2947,6 @@ irqreturn_t xhci_irq(struct usb_hcd *hcd)
 			event_ring_deq = xhci->event_ring->dequeue;
 			event_loop = 0;
 		}
-		//if ( handle_ret == UPDATE_HC_DEQUEUE_REG )
-		//	break;
 	#else
 	while ( xhci_handle_event(xhci) > 0) {
 		if ( ++event_loop >= LOOP_CHECK_COUNT ) {
@@ -3015,8 +3032,6 @@ static irqreturn_t xhci_irq_no_ack(struct usb_hcd *hcd)
 			event_ring_deq = xhci->event_ring->dequeue;
 			event_loop = 0;
 		}
-		//if ( handle_ret == UPDATE_HC_DEQUEUE_REG ) 
-		//	break;
 	#else
 	while ( xhci_handle_event(xhci) > 0) {
 		if ( ++event_loop >= LOOP_CHECK_COUNT ) {

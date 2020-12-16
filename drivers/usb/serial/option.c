@@ -2045,9 +2045,10 @@ static int option_probe(struct usb_serial *serial,
                         return -ENODEV;
                 }
 
-        #if 0 /* FIXME:
+        #if 1 /* FIXME:
                * Victor, 2020/8/4, here will let USB get bad interface to
-               * USB 2.0 and working bad.
+               * USB 2.0 and working bad. It is for imx8mq platform.
+	       * 2020/12/13: On CN913x platform is need this patched.
                */
                 /* For USB auto suspend */
 		pm_runtime_set_autosuspend_delay(&serial->dev->dev, 3000);
